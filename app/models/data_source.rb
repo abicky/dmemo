@@ -1,5 +1,3 @@
-require "active_record/connection_adapters/redshift_adapter"
-
 class DataSource < ActiveRecord::Base
 
   validates :name, :adapter, :host, :dbname, :user, presence: true
@@ -10,27 +8,19 @@ class DataSource < ActiveRecord::Base
 
   after_save :disconnect_data_source!
 
-  module DynamicTable
-    class AbstractTable < ActiveRecord::Base
-      self.abstract_class = true
-    end
+  class ConnectionBad < IOError
   end
 
-  class ConnectionBad < IOError
+  def self.data_source_adapter_cache
+    @data_source_adapter_cache ||= {}
   end
 
   def self.data_source_tables_cache
     @data_source_tables_cache ||= {}
   end
 
-  def source_base_class
-    base_class_name = source_base_class_name
-    return DynamicTable.const_get(base_class_name) if DynamicTable.const_defined?(base_class_name)
-
-    base_class = Class.new(DynamicTable::AbstractTable)
-    DynamicTable.const_set(base_class_name, base_class)
-    base_class.establish_connection(connection_config)
-    base_class
+  def data_source_adapter
+    self.class.data_source_adapter_cache[id] ||= Object.const_get("DataSourceAdapters::#{adapter.capitalize}Adapter").new(self)
   end
 
   def data_source_tables
@@ -42,9 +32,8 @@ class DataSource < ActiveRecord::Base
 
   def reset_data_source_tables!
     Rails.cache.delete(cache_key_source_table_names)
+    self.class.data_source_adapter_cache.delete(id)
     self.class.data_source_tables_cache[id] = {}
-    base_class_name = source_base_class_name
-    DynamicTable.send(:remove_const, base_class_name) if DynamicTable.const_defined?(base_class_name)
   end
 
   def access_logging
@@ -53,55 +42,9 @@ class DataSource < ActiveRecord::Base
 
   private
 
-  def connection_config_password
-    password.present? ? password : nil
-  end
-
-  def connection_config_encoding
-    encoding.present? ? encoding : nil
-  end
-
-  def connection_config_pool
-    pool.present? ? pool : nil
-  end
-
-  def connection_config
-    {
-      adapter: adapter,
-      host: host,
-      port: port,
-      database: dbname,
-      username: user,
-      password: connection_config_password,
-      encoding: connection_config_encoding,
-      pool: connection_config_pool,
-    }.compact
-  end
-
-  def source_base_class_name
-    "#{name.gsub(/[^\w_-]/, '').underscore.classify}_Base"
-  end
-
   def source_table_names
-    table_names = access_logging do
-      case source_base_class.connection
-        when ActiveRecord::ConnectionAdapters::PostgreSQLAdapter, ActiveRecord::ConnectionAdapters::RedshiftAdapter
-          source_base_class.connection.query(<<-SQL, 'SCHEMA')
-            SELECT schemaname, tablename
-            FROM (
-              SELECT schemaname, tablename FROM pg_tables WHERE schemaname = ANY (current_schemas(false))
-              UNION
-              SELECT schemaname, viewname AS tablename FROM pg_views WHERE schemaname = ANY (current_schemas(false))
-            ) tables
-            ORDER BY schemaname, tablename;
-          SQL
-        else
-          source_base_class.connection.tables.map {|table_name| [dbname, table_name] }
-      end
-    end
+    table_names = access_logging { data_source_adapter.source_table_names }
     table_names.reject {|_, table_name| ignored_table_patterns.match(table_name) }
-  rescue ActiveRecord::ActiveRecordError, Mysql2::Error, PG::Error => e
-    raise ConnectionBad.new(e)
   end
 
   def cache_key_source_table_names
@@ -135,6 +78,6 @@ class DataSource < ActiveRecord::Base
   end
 
   def disconnect_data_source!
-    source_base_class.establish_connection.disconnect!
+    data_source_adapter.disconnect_data_source!
   end
 end

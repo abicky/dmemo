@@ -3,12 +3,6 @@ require "rails_helper"
 describe DataSource, type: :model do
   let(:data_source) { FactoryGirl.create(:data_source) }
 
-  describe "#source_base_class" do
-    it "return source base class" do
-      expect(data_source.source_base_class).to eq(DataSource::DynamicTable::Dmemo_Base)
-    end
-  end
-
   describe "#data_source_tables" do
     it "returns data source tables" do
       expect(data_source.data_source_tables.size).to be > 0
