@@ -23,6 +23,36 @@ class DataSource < ActiveRecord::Base
     @data_source_tables_cache ||= {}
   end
 
+  def source_base_class
+    base_class_name = source_base_class_name
+    return DynamicTable.const_get(base_class_name) if DynamicTable.const_defined?(base_class_name)
+
+    base_class = Class.new(DynamicTable::AbstractTable)
+    DynamicTable.const_set(base_class_name, base_class)
+    base_class.establish_connection(connection_config)
+    base_class
+  end
+
+  def data_source_tables
+    table_names = cached_source_table_names
+    table_names.map do |schema_name, table_name|
+      data_source_table(schema_name, table_name, table_names)
+    end
+  end
+
+  def reset_data_source_tables!
+    Rails.cache.delete(cache_key_source_table_names)
+    self.class.data_source_tables_cache[id] = {}
+    base_class_name = source_base_class_name
+    DynamicTable.send(:remove_const, base_class_name) if DynamicTable.const_defined?(base_class_name)
+  end
+
+  def access_logging
+    Rails.logger.tagged("DataSource #{name}") { yield }
+  end
+
+  private
+
   def connection_config_password
     password.present? ? password : nil
   end
@@ -50,16 +80,6 @@ class DataSource < ActiveRecord::Base
 
   def source_base_class_name
     "#{name.gsub(/[^\w_-]/, '').underscore.classify}_Base"
-  end
-
-  def source_base_class
-    base_class_name = source_base_class_name
-    return DynamicTable.const_get(base_class_name) if DynamicTable.const_defined?(base_class_name)
-
-    base_class = Class.new(DynamicTable::AbstractTable)
-    DynamicTable.const_set(base_class_name, base_class)
-    base_class.establish_connection(connection_config)
-    base_class
   end
 
   def source_table_names
@@ -110,29 +130,11 @@ class DataSource < ActiveRecord::Base
     raise ConnectionBad.new(e)
   end
 
-  def data_source_tables
-    table_names = cached_source_table_names
-    table_names.map do |schema_name, table_name|
-      data_source_table(schema_name, table_name, table_names)
-    end
-  end
-
-  def reset_data_source_tables!
-    Rails.cache.delete(cache_key_source_table_names)
-    self.class.data_source_tables_cache[id] = {}
-    base_class_name = source_base_class_name
-    DynamicTable.send(:remove_const, base_class_name) if DynamicTable.const_defined?(base_class_name)
-  end
-
   def ignored_table_patterns
     @ignored_table_patterns ||= Regexp.union(ignored_tables.pluck(:pattern).map {|pattern| Regexp.new(pattern, true) })
   end
 
   def disconnect_data_source!
     source_base_class.establish_connection.disconnect!
-  end
-
-  def access_logging
-    Rails.logger.tagged("DataSource #{name}") { yield }
   end
 end
